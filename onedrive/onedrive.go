@@ -25,29 +25,30 @@ import (
 )
 
 const (
-	rcloneClientID              = "0000000044165769"
-	rcloneEncryptedClientSecret = "ugVWLNhKkVT1-cbTRO-6z1MlzwdW6aMwpKgNaFG-qXjEn_WfDnG9TVyRA5yuoliU"
+	rcloneClientID              = "52857fec-4bc2-483f-9f1b-5fe28e97532c"
+	rcloneEncryptedClientSecret = "QTAEjPFIP9M12FenE7HVMliY+2eY59nb5fM9zUcPCM4="
 	minSleep                    = 10 * time.Millisecond
 	maxSleep                    = 2 * time.Second
-	decayConstant               = 2                               // bigger for slower decay, exponential
-	rootURL                     = "https://api.onedrive.com/v1.0" // root URL for requests
+	decayConstant               = 2                                                       // bigger for slower decay, exponential
+	rootURL                     = "https://guanghou-my.sharepoint.com/_api/v2.0/drives/me" // root URL for requests
+	discoveryServiceURL         = "https://api.office.com/discovery/v2.0/me/services"
 )
 
 // Globals
 var (
 	// Description of how to auth for this app
 	oauthConfig = &oauth2.Config{
-		Scopes: []string{
-			"wl.signin",          // Allow single sign-on capabilities
-			"wl.offline_access",  // Allow receiving a refresh token
-			"onedrive.readwrite", // r/w perms to all of a user's OneDrive files
-		},
+		// Scopes: []string{
+		// 	"wl.signin",          // Allow single sign-on capabilities
+		// 	"wl.offline_access",  // Allow receiving a refresh token
+		// 	"onedrive.readwrite", // r/w perms to all of a user's OneDrive files
+		// },
 		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://login.live.com/oauth20_authorize.srf",
-			TokenURL: "https://login.live.com/oauth20_token.srf",
+			AuthURL:  "https://login.microsoftonline.com/common/oauth2/authorize",
+			TokenURL: "https://login.microsoftonline.com/common/oauth2/token",
 		},
 		ClientID:     rcloneClientID,
-		ClientSecret: fs.MustReveal(rcloneEncryptedClientSecret),
+		ClientSecret: rcloneEncryptedClientSecret,
 		RedirectURL:  oauthutil.RedirectLocalhostURL,
 	}
 	chunkSize    = fs.SizeSuffix(10 * 1024 * 1024)
@@ -168,7 +169,7 @@ func shouldRetry(resp *http.Response, err error) (bool, error) {
 func (f *Fs) readMetaDataForPath(path string) (info *api.Item, resp *http.Response, err error) {
 	opts := rest.Opts{
 		Method: "GET",
-		Path:   "/drive/root:/" + pathEscape(replaceReservedChars(path)),
+		Path:   "/root:/" + pathEscape(replaceReservedChars(path)),
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(&opts, nil, &info)
@@ -319,7 +320,7 @@ func (f *Fs) CreateDir(pathID, leaf string) (newID string, err error) {
 	var info *api.Item
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   "/drive/items/" + pathID + "/children",
+		Path:   "/items/" + pathID + "/children",
 	}
 	mkdir := api.CreateItemRequest{
 		Name:             replaceReservedChars(leaf),
@@ -353,7 +354,7 @@ func (f *Fs) listAll(dirID string, directoriesOnly bool, filesOnly bool, fn list
 	// https://dev.onedrive.com/odata/optional-query-parameters.htm
 	opts := rest.Opts{
 		Method: "GET",
-		Path:   "/drive/items/" + dirID + "/children?top=1000",
+		Path:   "/items/" + dirID + "/children?top=1000",
 	}
 OUTER:
 	for {
@@ -393,8 +394,8 @@ OUTER:
 		if result.NextLink == "" {
 			break
 		}
-		opts.Path = ""
-		opts.RootURL = result.NextLink
+		opts.Path = result.NextLink
+		opts.Absolute = true
 	}
 	return
 }
@@ -500,7 +501,7 @@ func (f *Fs) Mkdir(dir string) error {
 func (f *Fs) deleteObject(id string) error {
 	opts := rest.Opts{
 		Method:     "DELETE",
-		Path:       "/drive/items/" + id,
+		Path:       "/items/" + id,
 		NoResponse: true,
 	}
 	return f.pacer.Call(func() (bool, error) {
@@ -564,7 +565,8 @@ func (f *Fs) waitForJob(location string, o *Object) error {
 	for time.Now().Before(deadline) {
 		opts := rest.Opts{
 			Method:       "GET",
-			RootURL:      location,
+			Path:         location,
+			Absolute:     true,
 			IgnoreStatus: true, // Ignore the http status response since it seems to return valid info on 500 errors
 		}
 		var resp *http.Response
@@ -640,7 +642,7 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	// Copy the object
 	opts := rest.Opts{
 		Method:       "POST",
-		Path:         "/drive/items/" + srcObj.id + "/action.copy",
+		Path:         "/items/" + srcObj.id + "/action.copy",
 		ExtraHeaders: map[string]string{"Prefer": "respond-async"},
 		NoResponse:   true,
 	}
@@ -708,7 +710,7 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 	// Move the object
 	opts := rest.Opts{
 		Method: "PATCH",
-		Path:   "/drive/items/" + srcObj.id,
+		Path:   "/items/" + srcObj.id,
 	}
 	move := api.MoveItemRequest{
 		Name: replaceReservedChars(leaf),
@@ -859,7 +861,7 @@ func (o *Object) ModTime() time.Time {
 func (o *Object) setModTime(modTime time.Time) (*api.Item, error) {
 	opts := rest.Opts{
 		Method: "PATCH",
-		Path:   "/drive/root:/" + pathEscape(o.srvPath()),
+		Path:   "/root:/" + pathEscape(o.srvPath()),
 	}
 	update := api.SetFileSystemInfo{
 		FileSystemInfo: api.FileSystemInfoFacet{
@@ -897,7 +899,7 @@ func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	var resp *http.Response
 	opts := rest.Opts{
 		Method:  "GET",
-		Path:    "/drive/items/" + o.id + "/content",
+		Path:    "/items/" + o.id + "/content",
 		Options: options,
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
@@ -914,7 +916,7 @@ func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 func (o *Object) createUploadSession() (response *api.CreateUploadResponse, err error) {
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   "/drive/root:/" + pathEscape(o.srvPath()) + ":/upload.createSession",
+		Path:   "/root:/" + pathEscape(o.srvPath()) + ":/upload.createSession",
 	}
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
@@ -928,11 +930,13 @@ func (o *Object) createUploadSession() (response *api.CreateUploadResponse, err 
 func (o *Object) uploadFragment(url string, start int64, totalSize int64, chunk io.ReadSeeker, chunkSize int64) (err error) {
 	opts := rest.Opts{
 		Method:        "PUT",
-		RootURL:       url,
+		Path:          url,
+		Absolute:      true,
 		ContentLength: &chunkSize,
 		ContentRange:  fmt.Sprintf("bytes %d-%d/%d", start, start+chunkSize-1, totalSize),
 		Body:          chunk,
 	}
+	fs.Debugf(o, "OPTS: %s", opts.ContentRange)
 	var response api.UploadFragmentResponse
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
@@ -947,7 +951,8 @@ func (o *Object) uploadFragment(url string, start int64, totalSize int64, chunk 
 func (o *Object) cancelUploadSession(url string) (err error) {
 	opts := rest.Opts{
 		Method:     "DELETE",
-		RootURL:    url,
+		Path:       url,
+		Absolute:   true,
 		NoResponse: true,
 	}
 	var resp *http.Response
@@ -1020,7 +1025,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 		var resp *http.Response
 		opts := rest.Opts{
 			Method: "PUT",
-			Path:   "/drive/root:/" + pathEscape(o.srvPath()) + ":/content",
+			Path:   "/root:/" + pathEscape(o.srvPath()) + ":/content",
 			Body:   in,
 		}
 		// for go1.8 (see release notes) we must nil the Body if we want a
